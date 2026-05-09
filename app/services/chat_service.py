@@ -50,6 +50,19 @@ TOOLS = [
         },
     },
     {
+        "name": "create_category",
+        "description": "Crea una nueva categoría de gasto cuando ninguna de las existentes aplica. Llamá get_categories primero, y solo creá una nueva si realmente no hay ninguna apropiada.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":  {"type": "string", "description": "Nombre de la categoría en español, conciso (ej: 'Supermercado', 'Salud', 'Transporte')"},
+                "icon":  {"type": "string", "description": "Emoji representativo, ej: '🛒'"},
+                "color": {"type": "string", "description": "Color hex ej: '#4CAF50'"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
         "name": "propose_expense",
         "description": "Propone un gasto para que el usuario lo confirme. Usá SIEMPRE esta herramienta en lugar de crear directamente. El usuario verá los detalles y podrá confirmar o cancelar.",
         "input_schema": {
@@ -64,6 +77,7 @@ TOOLS = [
                 "categoryName": {"type": "string",  "description": "Nombre legible de la categoría para mostrar al usuario"},
                 "isRecurring":  {"type": "boolean"},
                 "recurringDay": {"type": "integer", "description": "Día del mes (1-31), solo para FIXED"},
+                "fromAccount":  {"type": "string", "enum": ["efectivo", "banco"], "description": "Con qué cuenta se pagó. Efectivo por defecto."},
             },
             "required": ["description", "amount", "date", "type", "moneyType", "categoryId", "categoryName"],
         },
@@ -78,9 +92,9 @@ Podés consultar gastos, analizarlos y registrar nuevos gastos con lenguaje natu
 
 Reglas para REGISTRAR un gasto (MUY IMPORTANTE):
 1. Llamá get_categories para ver las categorías disponibles.
-2. Elegí la categoría más apropiada.
+2. Elegí la categoría más apropiada. Si ninguna aplica claramente, llamá create_category para crear una nueva con nombre, emoji e ícono adecuados, y usá el ID retornado.
 3. Fecha no especificada → hoy. Moneda no especificada → ARS. Tipo no especificado → VARIABLE.
-4. Llamá propose_expense con todos los datos. NUNCA crees el gasto directamente.
+4. Llamá propose_expense con todos los datos, incluyendo fromAccount ('efectivo' si pagó en efectivo, 'banco' si fue débito/transferencia bancaria). NUNCA crees el gasto directamente.
 5. Tras proponer, escribí UNA oración corta: qué se va a registrar, cuánto y en qué categoría. El usuario verá botones para confirmar o cancelar.
 
 Reglas para CONSULTAR:
@@ -108,6 +122,11 @@ def _call_tool(name: str, input_data: dict) -> Any:
         if name == "get_totals":
             params = {k: input_data[k] for k in ("from", "to") if k in input_data}
             r = requests.get(f"{NESTJS_BASE}/expenses/totals", params=params, timeout=10)
+            r.raise_for_status()
+            return r.json()
+
+        if name == "create_category":
+            r = requests.post(f"{NESTJS_BASE}/categories", json=input_data, timeout=10)
             r.raise_for_status()
             return r.json()
 
