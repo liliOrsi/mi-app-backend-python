@@ -160,37 +160,41 @@ Respondé siempre en español. Sé conciso y amigable.\
 """
 
 
-def _call_tool(name: str, input_data: dict) -> Any:
+def _auth_headers(token: str) -> dict:
+    return {"Authorization": token} if token else {}
+
+
+def _call_tool(name: str, input_data: dict, token: str = "") -> Any:
+    headers = _auth_headers(token)
     try:
         if name == "get_expenses":
             params = {k: input_data[k] for k in ("from", "to") if k in input_data}
-            r = requests.get(f"{NESTJS_BASE}/expenses", params=params, timeout=10)
+            r = requests.get(f"{NESTJS_BASE}/expenses", params=params, headers=headers, timeout=10)
             r.raise_for_status()
             return r.json()
 
         if name == "get_categories":
-            r = requests.get(f"{NESTJS_BASE}/categories", timeout=10)
+            r = requests.get(f"{NESTJS_BASE}/categories", headers=headers, timeout=10)
             r.raise_for_status()
             return r.json()
 
         if name == "get_totals":
             params = {k: input_data[k] for k in ("from", "to") if k in input_data}
-            r = requests.get(f"{NESTJS_BASE}/expenses/totals", params=params, timeout=10)
+            r = requests.get(f"{NESTJS_BASE}/expenses/totals", params=params, headers=headers, timeout=10)
             r.raise_for_status()
             return r.json()
 
         if name == "create_category":
-            r = requests.post(f"{NESTJS_BASE}/categories", json=input_data, timeout=10)
+            r = requests.post(f"{NESTJS_BASE}/categories", json=input_data, headers=headers, timeout=10)
             r.raise_for_status()
             return r.json()
 
         if name == "propose_expense":
-            # Don't create yet — just echo back so the AI can write its confirmation message
             return {"proposed": True, **input_data}
 
         if name == "get_incomes":
             params = {k: input_data[k] for k in ("from", "to") if k in input_data}
-            r = requests.get(f"{NESTJS_BASE}/incomes", params=params, timeout=10)
+            r = requests.get(f"{NESTJS_BASE}/incomes", params=params, headers=headers, timeout=10)
             r.raise_for_status()
             return r.json()
 
@@ -206,24 +210,24 @@ def _call_tool(name: str, input_data: dict) -> Any:
         return {"error": str(exc)}
 
 
-def create_expense_direct(data: dict) -> dict:
+def create_expense_direct(data: dict, token: str = "") -> dict:
     payload = {k: v for k, v in data.items() if k not in ("categoryName", "proposed")}
-    r = requests.post(f"{NESTJS_BASE}/expenses", json=payload, timeout=10)
+    r = requests.post(f"{NESTJS_BASE}/expenses", json=payload, headers=_auth_headers(token), timeout=10)
     r.raise_for_status()
     return r.json()
 
 
-def create_income_direct(data: dict) -> dict:
+def create_income_direct(data: dict, token: str = "") -> dict:
     payload = {k: v for k, v in data.items() if k != "proposed"}
-    r = requests.post(f"{NESTJS_BASE}/incomes", json=payload, timeout=10)
+    r = requests.post(f"{NESTJS_BASE}/incomes", json=payload, headers=_auth_headers(token), timeout=10)
     r.raise_for_status()
     return r.json()
 
 
-def create_reminder_direct(data: dict, user_email: str) -> dict:
+def create_reminder_direct(data: dict, user_email: str, token: str = "") -> dict:
     payload = {k: v for k, v in data.items() if k != "proposed"}
     payload["email"] = user_email
-    r = requests.post(f"{NESTJS_BASE}/reminders", json=payload, timeout=10)
+    r = requests.post(f"{NESTJS_BASE}/reminders", json=payload, headers=_auth_headers(token), timeout=10)
     r.raise_for_status()
     return r.json()
 
@@ -254,6 +258,7 @@ async def process_chat(
     history: list[dict],
     messages_history: list | None = None,
     user_email: str = "",
+    token: str = "",
 ) -> dict:
     today = date.today().isoformat()
     system = SYSTEM_PROMPT.format(today=today, user_email=user_email or "no especificado")
@@ -303,7 +308,7 @@ async def process_chat(
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = await asyncio.to_thread(_call_tool, block.name, block.input)
+                    result = await asyncio.to_thread(_call_tool, block.name, block.input, token)
                     if block.name == "propose_expense":
                         pending_expense = dict(block.input)
                     elif block.name == "propose_income":

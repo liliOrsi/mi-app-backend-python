@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import (
     process_chat,
@@ -11,14 +11,20 @@ from app.services.chat_service import (
 router = APIRouter()
 
 
+def _extract_token(request: Request) -> str:
+    return request.headers.get("authorization", "")
+
+
 @router.post("", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
+    token = _extract_token(request)
     history = [{"role": m.role, "content": m.content} for m in req.history]
     result = await process_chat(
         req.message,
         history,
         req.messages_history or None,
         user_email=req.user_email or "",
+        token=token,
     )
     return ChatResponse(
         response=result["response"],
@@ -32,30 +38,33 @@ async def chat(req: ChatRequest):
 
 
 @router.post("/confirm")
-async def confirm_expense(payload: dict):
+async def confirm_expense(payload: dict, request: Request):
+    token = _extract_token(request)
     try:
-        created = await asyncio.to_thread(create_expense_direct, payload)
+        created = await asyncio.to_thread(create_expense_direct, payload, token)
         return created
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.post("/confirm-income")
-async def confirm_income(payload: dict):
+async def confirm_income(payload: dict, request: Request):
+    token = _extract_token(request)
     try:
-        created = await asyncio.to_thread(create_income_direct, payload)
+        created = await asyncio.to_thread(create_income_direct, payload, token)
         return created
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.post("/confirm-reminder")
-async def confirm_reminder(payload: dict):
+async def confirm_reminder(payload: dict, request: Request):
+    token = _extract_token(request)
     user_email = payload.pop("email", None)
     if not user_email:
         raise HTTPException(status_code=400, detail="email requerido")
     try:
-        created = await asyncio.to_thread(create_reminder_direct, payload, user_email)
+        created = await asyncio.to_thread(create_reminder_direct, payload, user_email, token)
         return created
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
