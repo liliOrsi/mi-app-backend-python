@@ -1,6 +1,10 @@
 import asyncio
+import logging
+import traceback
 from fastapi import APIRouter, HTTPException, Request
 from app.schemas.chat import ChatRequest, ChatResponse
+
+logger = logging.getLogger(__name__)
 from app.services.chat_service import (
     process_chat,
     create_expense_direct,
@@ -19,13 +23,17 @@ def _extract_token(request: Request) -> str:
 async def chat(req: ChatRequest, request: Request):
     token = _extract_token(request)
     history = [{"role": m.role, "content": m.content} for m in req.history]
-    result = await process_chat(
-        req.message,
-        history,
-        req.messages_history or None,
-        user_email=req.user_email or "",
-        token=token,
-    )
+    try:
+        result = await process_chat(
+            req.message,
+            history,
+            req.messages_history or None,
+            user_email=req.user_email or "",
+            token=token,
+        )
+    except Exception as e:
+        logger.error("Error in process_chat: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
     return ChatResponse(
         response=result["response"],
         expense_created=result.get("expense_created"),

@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from datetime import date
 from typing import Any
 
@@ -7,6 +8,8 @@ import requests
 import anthropic
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 NESTJS_BASE = getattr(settings, "NESTJS_BASE_URL", "http://localhost:3000")
 MODEL = "claude-sonnet-4-6"
@@ -166,6 +169,7 @@ def _auth_headers(token: str) -> dict:
 
 def _call_tool(name: str, input_data: dict, token: str = "") -> Any:
     headers = _auth_headers(token)
+    logger.info("_call_tool: %s | token present: %s", name, bool(token))
     try:
         if name == "get_expenses":
             params = {k: input_data[k] for k in ("from", "to") if k in input_data}
@@ -207,6 +211,7 @@ def _call_tool(name: str, input_data: dict, token: str = "") -> Any:
         return {"error": f"Herramienta desconocida: {name}"}
 
     except requests.RequestException as exc:
+        logger.error("_call_tool %s failed: %s", name, exc)
         return {"error": str(exc)}
 
 
