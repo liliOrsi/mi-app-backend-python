@@ -1,3 +1,4 @@
+import io
 import json
 import asyncio
 import logging
@@ -6,6 +7,8 @@ from typing import Any
 
 import requests
 import anthropic
+import pandas as pd
+from pypdf import PdfReader
 
 from app.core.config import settings
 
@@ -256,6 +259,197 @@ def _serialize_content(content: Any) -> Any:
 
 def _serialize_messages(messages: list) -> list:
     return [{"role": m["role"], "content": _serialize_content(m["content"])} for m in messages]
+
+
+def _extract_text_from_file(content: bytes, filename: str) -> str:
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "txt"
+    if ext == "pdf":
+        reader = PdfReader(io.BytesIO(content))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    if ext == "csv":
+        raw = None
+        for enc in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                raw = content.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if raw is None:
+            raw = content.decode("latin-1", errors="replace")
+        first_cols = raw.strip().split("\n")[0].split(",")
+        try:
+            float(first_cols[2].strip())
+            raw = "fecha,descripcion,debito,credito\n" + raw
+        except (ValueError, IndexError):
+            pass
+        return raw
+    if ext in ("xlsx", "xls"):
+        df = pd.read_excel(io.BytesIO(content))
+        return df.to_string(index=False)
+    return content.decode("utf-8", errors="replace")
+
+
+def _split_into_chunks(text: str, chunk_size: int = 35) -> list[str]:
+    """Split statement text into chunks preserving the header row."""
+    lines = [l for l in text.strip().split("\n") if l.strip()]
+    if not lines:
+        return []
+    # Detect header: first field of first line is non-numeric
+    try:
+        float(lines[0].split(",")[0].strip())
+        header, data = None, lines
+    except ValueError:
+        header, data = lines[0], lines[1:]
+    chunks = []
+    for i in range(0, len(data), chunk_size):
+        chunk = data[i : i + chunk_size]
+        chunks.append((header + "\n" + "\n".join(chunk)) if header else "\n".join(chunk))
+    return chunks or [text]
+
+
+_STATEMENT_TOOL = {
+    "name": "record_transactions",
+    "description": "Registra todas las transacciones extraídas y categorizadas del resumen bancario.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "transactions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description":          {"type": "string"},
+                        "amount":               {"type": "number"},
+                        "date":                 {"type": "string"},
+                        "isExpense":            {"type": "boolean"},
+                        "moneyType":            {"type": "string", "enum": ["ARS", "USD"]},
+                        "type":                 {"type": "string", "enum": ["FIXED", "VARIABLE"]},
+                        "categoryId":           {"type": ["integer", "null"], "description": "ID de la categoría de la lista. OBLIGATORIO para gastos, null solo para ingresos."},
+                        "categoryName":         {"type": ["string", "null"]},
+                        "fromAccount":          {"type": "string"},
+                        "source":               {"type": ["string", "null"]},
+                        "needsNewCategory":     {"type": "boolean"},
+                        "suggestedCategoryName":  {"type": ["string", "null"]},
+                        "suggestedCategoryIcon":  {"type": ["string", "null"]},
+                        "suggestedCategoryColor": {"type": ["string", "null"]},
+                    },
+                    "required": ["description", "amount", "date", "isExpense", "moneyType",
+                                 "type", "fromAccount", "needsNewCategory"],
+                },
+            }
+        },
+        "required": ["transactions"],
+    },
+}
+
+
+async def analyze_bank_statement(
+    file_content: bytes,
+    filename: str,
+    token: str = "",
+    user_email: str = "",
+) -> dict:
+    today = date.today().isoformat()
+    client = get_client()
+
+    statement_text = _extract_text_from_file(file_content, filename)
+    categories = await asyncio.to_thread(_call_tool, "get_categories", {}, token)
+    categories_str = json.dumps(categories, ensure_ascii=False, indent=2)
+
+    prompt = f"""Analizá el siguiente fragmento de resumen de cuenta bancaria y extraé TODAS las transacciones. Luego llamá a la herramienta record_transactions con los datos.
+
+Fecha de hoy: {today}
+
+Formato: columnas "debito" y "credito". debito > 0 = GASTO, credito > 0 = INGRESO. Ignorá filas donde ambos sean 0.
+
+Reglas de categorización:
+1. Usá tu conocimiento general para identificar cada comercio.
+2. Comercios conocidos (Mendoza, Argentina):
+   - "YPF", "SHELL", "AXION", "OPESSA" → Combustible/Nafta
+   - "JUMBO", "DIA", "CARREFOUR", "COTO", "DISCO", "WALMART", "GRANJA" → Supermercado/Almacén
+   - "NETFLIX", "SPOTIFY", "DISNEY", "HBO", "AMAZON" → Entretenimiento/Streaming
+   - "FARMACITY", "FARMAFAGMA", "FARMA", "farmacia", "droguería" → Salud/Farmacia
+   - "PEDIDOSYA", "RAPPI", "BRULEE", "ISOLINA", "LA PARRA", "pizz", "cafe", "JEBBS" → Restaurante/Delivery
+   - "EDEMSA" → Electricidad (distribuidora de luz de Mendoza)
+   - "ECOGAS", "ECOGAS CUYANA" → Gas (distribuidora de gas de Mendoza)
+   - "MOVISTAR", "CLARO", "PERSONAL", "FIBERTEL" → Telefonía/Internet
+   - "PAGO VISA", "PAGO MASTERCARD" → Tarjetas de crédito
+   - "HIPERMASCOTAS", "CL HIPERMASCOTAS", "veterinaria", "mascotas" → Mascotas
+   - "CENTRO MEDICO", "medico", "clinica", "hospital", "salud" → Salud/Médico
+   - "PAGO SEG", "SEGURO DE VIDA", "SEGURO HOGAR" → Seguros
+   - "MERPAGO", "MERCADOPAGO" + nombre → identificá por el nombre del receptor (ej: "MERPAGO BRULEE" → restaurante, "MERPAGO AA2000" → estacionamiento)
+   - "SINCRONIA", "SINERGIA", "DINAMICA", "LPQ", "LUJAN AGRICOLA", "PLASTICOS", "WEISS", "VIRGEN DEL VALLE", "MODESTO ALVEAR" → usá tu criterio por el nombre para asignar la categoría más lógica
+3. La categoría "Bancos" es SOLO para: mantenimiento de cuenta, intereses, impuestos bancarios (IMP S/DEBITOS, IMP S/CRED, SELLADO, PERCEPCION IVA, MANTENIMIENTO DE CUENTA, EXTRACTO, PAQUETE GESTION, DEBITO LIQUIDACION).
+   NO pongas en Bancos: pagos de servicios, compras en comercios, transferencias a terceros.
+4. Si el comercio no tiene categoría apropiada en la lista → needsNewCategory: true, categoryId: null, y sugerí un nombre claro (ej: "Electricidad", "Gas", "Mascotas", "Telefonía"), un emoji representativo y un color hex.
+5. "DEBITO INMEDIATO" y "TRANSF" sin destino claro → categoría más cercana disponible o nueva categoría "Transferencias".
+6. Para INGRESOS (credito > 0): isExpense=false, categoryId=null, source=SALARY|FREELANCE|TRANSFER|REFUND|OTHER.
+7. Moneda ARS por defecto. fromAccount siempre "banco".
+8. type "FIXED" para servicios recurrentes (luz, gas, teléfono, seguros), "VARIABLE" para el resto.
+9. Fechas en formato MM/DD/AA → convertí a YYYY-MM-DD.
+
+Categorías disponibles:
+{categories_str}
+
+Movimientos a analizar:
+{{STATEMENT_TEXT}}"""
+
+    chunks = _split_into_chunks(statement_text)
+    print(f"[STATEMENT] {len(statement_text)} chars → {len(chunks)} chunks", flush=True)
+
+    tools = [_STATEMENT_TOOL]
+    all_transactions: list = []
+
+    for idx, chunk in enumerate(chunks):
+        if idx > 0:
+            await asyncio.sleep(5)
+
+        messages = [{"role": "user", "content": prompt.replace("{STATEMENT_TEXT}", chunk)}]
+
+        while True:
+            for attempt in range(4):
+                try:
+                    response = await asyncio.to_thread(
+                        client.messages.create,
+                        model=MODEL,
+                        max_tokens=8096,
+                        tools=tools,
+                        messages=messages,
+                    )
+                    break
+                except anthropic.RateLimitError:
+                    wait = 30 * (attempt + 1)
+                    print(f"[STATEMENT] rate limit, waiting {wait}s (attempt {attempt+1})", flush=True)
+                    await asyncio.sleep(wait)
+            else:
+                print("[STATEMENT] giving up on chunk after retries", flush=True)
+                break
+            print(f"[STATEMENT] chunk {idx+1}/{len(chunks)} stop_reason={response.stop_reason}", flush=True)
+
+            if response.stop_reason == "end_turn":
+                break
+
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+
+            for block in response.content:
+                if not hasattr(block, "type"):
+                    continue
+                if block.type == "tool_use" and block.name == "record_transactions":
+                    txs = block.input.get("transactions", [])
+                    print(f"[STATEMENT] chunk {idx+1}: {len(txs)} transactions", flush=True)
+                    all_transactions.extend(txs)
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": "ok"})
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                break
+
+    print(f"[STATEMENT] total: {len(all_transactions)} transactions", flush=True)
+    return {"transactions": all_transactions}
+
+
 
 
 async def process_chat(

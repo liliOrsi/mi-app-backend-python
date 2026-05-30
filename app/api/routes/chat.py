@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import traceback
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from app.schemas.chat import ChatRequest, ChatResponse
 
 logger = logging.getLogger(__name__)
@@ -10,6 +10,7 @@ from app.services.chat_service import (
     create_expense_direct,
     create_income_direct,
     create_reminder_direct,
+    analyze_bank_statement,
 )
 
 router = APIRouter()
@@ -63,6 +64,27 @@ async def confirm_income(payload: dict, request: Request):
         return created
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/analyze-statement")
+async def analyze_statement(
+    request: Request,
+    file: UploadFile = File(...),
+    user_email: str = Form(""),
+):
+    token = _extract_token(request)
+    content = await file.read()
+    try:
+        result = await analyze_bank_statement(
+            content,
+            file.filename or "statement.txt",
+            token=token,
+            user_email=user_email,
+        )
+        return result
+    except Exception as exc:
+        logger.error("Error analyzing statement: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/confirm-reminder")
